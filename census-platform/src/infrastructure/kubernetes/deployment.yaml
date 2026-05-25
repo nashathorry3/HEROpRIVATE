@@ -1,0 +1,348 @@
+##############################################################################
+# Census Platform — Kubernetes Deployment Configuration
+# Includes: API, Identity Service, Fraud Detection, ZKP Service
+##############################################################################
+
+---
+# ─── Namespace ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: census-platform
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.28
+
+---
+# ─── Census API Deployment ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: census-api
+  namespace: census-platform
+  labels:
+    app: census-api
+    component: backend
+    version: "1.0.0"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: census-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: census-api
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: census-api-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Anti-affinity: spread across nodes for HA
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - census-api
+                topologyKey: kubernetes.io/hostname
+
+      containers:
+        - name: census-api
+          image: census-platform/api:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+
+          env:
+            - name: ENVIRONMENT
+              value: "production"
+            - name: IDENTITY_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: census-secrets
+                  key: identity-db-url
+            - name: CENSUS_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: census-secrets
+                  key: census-db-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: census-secrets
+                  key: redis-url
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: census-config
+                  key: kafka-bootstrap-servers
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: census-secrets
+                  key: encryption-key
+            - name: HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: census-secrets
+                  key: hmac-secret
+            - name: GLOBAL_PHONE_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: census-secrets
+                  key: global-phone-salt
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: faiss-index
+              mountPath: /data/faiss
+            - name: circuits
+              mountPath: /circuits
+              readOnly: true
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: models
+          configMap:
+            name: ml-models-config
+        - name: faiss-index
+          persistentVolumeClaim:
+            claimName: faiss-index-pvc
+        - name: circuits
+          configMap:
+            name: zkp-circuits-config
+
+---
+# ─── Service ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: census-api-svc
+  namespace: census-platform
+  labels:
+    app: census-api
+spec:
+  selector:
+    app: census-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+
+---
+# ─── Horizontal Pod Autoscaler ────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: census-api-hpa
+  namespace: census-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: census-api
+  minReplicas: 3
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "100"
+
+---
+# ─── Network Policy (Zero Trust) ─────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: census-api-netpol
+  namespace: census-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: census-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: kong-gateway
+          podSelector:
+            matchLabels:
+              app: kong
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # Allow DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+    # Allow PostgreSQL Identity DB
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: census-databases
+          podSelector:
+            matchLabels:
+              app: identity-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow PostgreSQL Census DB
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: census-databases
+          podSelector:
+            matchLabels:
+              app: census-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Allow Kafka
+    - to:
+        - podSelector:
+            matchLabels:
+              app: kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+
+---
+# ─── PodDisruptionBudget ─────────────────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: census-api-pdb
+  namespace: census-platform
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: census-api
+
+---
+# ─── FAISS Index PVC ─────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: faiss-index-pvc
+  namespace: census-platform
+spec:
+  accessModes:
+    - ReadWriteMany   # Shared across API replicas
+  storageClassName: nfs-fast
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# ─── Service Account ─────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: census-api-sa
+  namespace: census-platform
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT_ID:role/census-api-role"
+
+---
+# ─── ConfigMap ───────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: census-config
+  namespace: census-platform
+data:
+  kafka-bootstrap-servers: "kafka-0.kafka-headless:9092,kafka-1.kafka-headless:9092"
+  face-similarity-threshold: "0.85"
+  fraud-block-threshold: "0.85"
+  k-anonymity-threshold: "100"
+  census-id: "CENSUS-2026"
+  data-retention-identity-months: "12"
+  data-retention-census-years: "10"
