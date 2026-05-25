@@ -56,18 +56,15 @@ public class SecurityConfig {
             )
 
             // Security headers
-            .headers(headers -> headers
-                .contentSecurityPolicy(csp -> csp
-                    .policyDirectives("default-src 'self'; frame-ancestors 'none'")
-                )
-                .referrerPolicy(ref -> ref
-                    .policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.STRICT_ORIGIN)
-                )
-                .permissionsPolicy(pp -> pp
-                    .policy("camera=(), microphone=(), geolocation=()")
-                )
-                .frameOptions(fo -> fo.deny())
-            )
+            .headers(headers -> {
+                headers.contentSecurityPolicy(csp -> csp
+                    .policyDirectives("default-src 'self'; frame-ancestors 'none'"));
+                headers.referrerPolicy(ref -> ref
+                    .policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.STRICT_ORIGIN));
+                headers.permissionsPolicy(pp -> pp
+                    .policy("camera=(), microphone=(), geolocation=()"));
+                headers.frameOptions(fo -> fo.deny());
+            })
 
             // JWT filter
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)

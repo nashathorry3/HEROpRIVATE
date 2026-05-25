@@ -1,39 +1,42 @@
 package gov.census.platform.audit.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import gov.census.platform.audit.model.AuditLog;
-import gov.census.platform.audit.repository.AuditLogRepository;
 import gov.census.platform.common.config.AppProperties;
 import gov.census.platform.common.util.HashUtil;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.lang.Nullable;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Immutable audit trail.
- * Every security event is:
- *  1. Written to Kafka (durable, ordered)
- *  2. Consumed by AuditWriter → PostgreSQL (append-only)
- *  3. HMAC-signed to detect tampering
- *
- * Non-blocking: uses @Async to avoid slowing down the main request.
+ * Events go to Kafka → PostgreSQL (append-only).
+ * Every event is HMAC-signed to detect tampering.
+ * Non-blocking: @Async so it never slows down the main request.
+ * KafkaTemplate is optional — falls back to structured logging when Kafka unavailable.
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AuditService {
 
+    @Nullable
     private final KafkaTemplate<String, AuditLog> kafkaTemplate;
     private final AppProperties props;
-    private final ObjectMapper objectMapper;
 
-    // PII fields that must never appear in audit metadata
+    @Autowired
+    public AuditService(@Nullable KafkaTemplate<String, AuditLog> kafkaTemplate,
+                        AppProperties props) {
+        this.kafkaTemplate = kafkaTemplate;
+        this.props = props;
+    }
+
     private static final Set<String> PII_KEYS = Set.of(
             "name", "phone", "email", "address", "dob",
             "national_id", "passport", "face_image", "embedding"
@@ -47,8 +50,12 @@ public class AuditService {
             Map<String, Object> metadata
     ) {
         try {
-            Map<String, Object> sanitized = sanitize(metadata);
-            String content = buildSignatureContent(eventType, outcome, actorHash, sanitized);
+            Map<String, String> sanitized = sanitize(metadata);
+            String content = String.format("%s|%s|%s|%d",
+                    eventType, outcome,
+                    actorHash != null ? HashUtil.toHex(actorHash) : "null",
+                    Instant.now().getEpochSecond());
+
             byte[] signature = HashUtil.hmacSha256(
                     props.getSecurity().getCrypto().getHmacSecret(), content
             );
@@ -63,37 +70,25 @@ public class AuditService {
                     .signature(signature)
                     .build();
 
-            kafkaTemplate.send(
-                    props.getKafka() != null ? "census.audit.events" : "census.audit.events",
-                    eventType,
-                    entry
-            );
+            if (kafkaTemplate != null) {
+                kafkaTemplate.send("census.audit.events", eventType, entry);
+            } else {
+                log.info("AUDIT [{}] outcome={} actor={}", eventType, outcome,
+                        actorHash != null ? HashUtil.toHex(actorHash).substring(0, 8) + "..." : "system");
+            }
         } catch (Exception e) {
-            // Audit failures must not break the main flow — log and continue
-            log.error("Failed to emit audit event [{}]: {}", eventType, e.getMessage());
+            log.error("Audit event [{}] failed: {}", eventType, e.getMessage());
         }
     }
 
-    private String buildSignatureContent(
-            String eventType, String outcome, byte[] actorHash, Map<String, Object> metadata
-    ) {
-        return String.format("%s|%s|%s|%d",
-                eventType,
-                outcome,
-                actorHash != null ? HashUtil.toHex(actorHash) : "null",
-                Instant.now().getEpochSecond()
-        );
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> sanitize(Map<String, Object> metadata) {
+    private Map<String, String> sanitize(Map<String, Object> metadata) {
         if (metadata == null) return Map.of();
         return metadata.entrySet().stream()
-                .collect(java.util.stream.Collectors.toMap(
+                .collect(Collectors.toMap(
                         Map.Entry::getKey,
                         e -> PII_KEYS.contains(e.getKey().toLowerCase())
                                 ? "[REDACTED]"
-                                : e.getValue()
+                                : String.valueOf(e.getValue())
                 ));
     }
 }

@@ -27,6 +27,7 @@ public class Device {
     private byte[] fingerprintHash;
 
     @Column(name = "risk_score", precision = 3, scale = 2)
+    @Builder.Default
     private BigDecimal riskScore = BigDecimal.ZERO;
 
     @CreationTimestamp
@@ -38,9 +39,11 @@ public class Device {
     private Instant lastSeen;
 
     @Column(name = "registration_count")
+    @Builder.Default
     private int registrationCount = 0;
 
     @Column(name = "is_blocked")
+    @Builder.Default
     private boolean blocked = false;
 
     @Column(name = "block_reason", length = 100)

@@ -56,9 +56,11 @@ public class Citizen {
     private UUID zkpTokenId;
 
     @Column(name = "verification_level", nullable = false)
+    @Builder.Default
     private int verificationLevel = 1;  // 1=phone, 2=face+phone, 3=doc+face+phone
 
     @Column(name = "is_active")
+    @Builder.Default
     private boolean active = true;
 
     @CreationTimestamp

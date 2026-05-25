@@ -1,0 +1,72 @@
+# Development profile — uses H2 in-memory DB, no Kafka, no Redis cluster
+spring:
+  datasource:
+    url: "jdbc:h2:mem:censusdev;DB_CLOSE_DELAY=-1;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;INIT=CREATE SCHEMA IF NOT EXISTS identity\\;CREATE SCHEMA IF NOT EXISTS census\\;CREATE SCHEMA IF NOT EXISTS audit"
+    username: census
+    password: devpassword
+    driver-class-name: org.h2.Driver
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+
+  flyway:
+    enabled: false     # Flyway uses PostgreSQL syntax — skip in dev
+
+  data:
+    redis:
+      url: redis://localhost:6379
+      # Uses embedded fake Redis (Testcontainers or lettuce auto-fallback)
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    # Kafka errors are swallowed by AuditService — app still works without it
+
+# Override all secrets for local dev
+census:
+  security:
+    jwt:
+      secret: "dev-jwt-secret-must-be-at-least-32-characters-long!"
+    otp:
+      ttl-seconds: 300
+      max-attempts: 3
+    crypto:
+      global-phone-salt: "dev-phone-salt"
+      encryption-key: "dev-encryption-key-32chars!!!!!!"
+      hmac-secret: "dev-hmac-secret-32chars!!!!!!!!!"
+  face:
+    similarity-threshold: 0.85
+    liveness-threshold: 0.92
+    model-service-url: http://localhost:8081
+  fraud:
+    block-threshold: 0.85
+    review-threshold: 0.70
+  census:
+    id: "CENSUS-2026-DEV"
+    k-anonymity-threshold: 5      # Lower threshold for dev testing
+  twilio:
+    account-sid: "ACdevtest000000000000000000000000"
+    auth-token: "devtoken"
+    from-number: "+15005550006"
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+
+logging:
+  level:
+    gov.census: DEBUG
+    org.springframework.security: DEBUG

@@ -44,6 +44,7 @@ public class ZkpToken {
     private Instant issuedAt;
 
     @Column(name = "census_used")
+    @Builder.Default
     private boolean censusUsed = false;
 
     @Column(name = "census_used_at")

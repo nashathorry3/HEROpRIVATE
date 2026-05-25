@@ -51,11 +51,11 @@ public class AuditLog {
     private Double riskScore;
 
     @ElementCollection
-    @CollectionTable(name = "audit_log_metadata", schema = "audit",
+    @CollectionTable(name = "audit_log_metadata",
             joinColumns = @JoinColumn(name = "audit_log_id"))
-    @MapKeyColumn(name = "key")
-    @Column(name = "value")
-    private Map<String, Object> metadata;
+    @MapKeyColumn(name = "meta_key", length = 100)
+    @Column(name = "meta_value", length = 500)
+    private Map<String, String> metadata;
 
     // HMAC-SHA256 of event content — detects tampering
     @Column(name = "signature", nullable = false, columnDefinition = "bytea")

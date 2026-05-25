@@ -37,9 +37,11 @@ public class OtpSession {
     private Instant expiresAt;
 
     @Column(name = "attempts")
+    @Builder.Default
     private int attempts = 0;
 
     @Column(name = "verified")
+    @Builder.Default
     private boolean verified = false;
 
     @CreationTimestamp
