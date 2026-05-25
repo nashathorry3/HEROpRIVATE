@@ -1,0 +1,174 @@
+##############################################################################
+# Census Platform — Local Development Docker Compose
+# NOT for production — for development/testing only
+##############################################################################
+
+version: "3.9"
+
+services:
+  # ─── API Services ───────────────────────────────────────────────────────────
+  census-api:
+    build:
+      context: ../..
+      dockerfile: src/infrastructure/docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - IDENTITY_DB_URL=postgresql+asyncpg://census:devpassword@identity-db:5432/identity
+      - CENSUS_DB_URL=postgresql+asyncpg://census:devpassword@census-db:5432/census
+      - AUDIT_DB_URL=postgresql+asyncpg://census:devpassword@audit-db:5432/audit
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - GLOBAL_PHONE_SALT=dev-salt-change-in-production
+      - ENCRYPTION_KEY=dev-key-32-chars-change-in-prod!!
+      - HMAC_SECRET=dev-hmac-secret-change-in-production
+      - ZKP_CIRCUIT_HASH=placeholder
+      - FACENET_MODEL_PATH=/models/facenet_512.onnx
+      - LIVENESS_MODEL_PATH=/models/liveness_detector.onnx
+      - FRAUD_MODEL_PATH=/models/fraud_detector.joblib
+      - FAISS_INDEX_PATH=/data/faiss/face_index.bin
+    volumes:
+      - faiss-data:/data/faiss
+    depends_on:
+      identity-db:
+        condition: service_healthy
+      census-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - backend-net
+    restart: unless-stopped
+
+  # ─── Databases ──────────────────────────────────────────────────────────────
+  identity-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: identity
+      POSTGRES_USER: census
+      POSTGRES_PASSWORD: devpassword
+    volumes:
+      - identity-db-data:/var/lib/postgresql/data
+      - ./init-identity-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U census -d identity"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend-net
+
+  census-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: census
+      POSTGRES_USER: census
+      POSTGRES_PASSWORD: devpassword
+    volumes:
+      - census-db-data:/var/lib/postgresql/data
+      - ./init-census-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U census -d census"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend-net
+
+  audit-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: audit
+      POSTGRES_USER: census_audit_writer  # Write-only user
+      POSTGRES_PASSWORD: devpassword
+    volumes:
+      - audit-db-data:/var/lib/postgresql/data
+    networks:
+      - backend-net
+
+  # ─── Cache ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass devpassword --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - backend-net
+
+  # ─── Message Queue ──────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    networks:
+      - backend-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - backend-net
+
+  # ─── Monitoring ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - backend-net
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=devpassword
+    depends_on:
+      - prometheus
+    networks:
+      - backend-net
+
+  # ─── Frontend ───────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ../..
+      dockerfile: src/infrastructure/docker/Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://census-api:8000
+    depends_on:
+      - census-api
+    networks:
+      - backend-net
+
+volumes:
+  identity-db-data:
+  census-db-data:
+  audit-db-data:
+  redis-data:
+  faiss-data:
+
+networks:
+  backend-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

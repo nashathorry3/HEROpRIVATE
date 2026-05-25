@@ -1,0 +1,64 @@
+# Census Platform — API Service Dockerfile
+# Multi-stage build for minimal attack surface
+
+# ─── Build Stage ─────────────────────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+# Install build dependencies (not included in final image)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    libopencv-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# ─── Runtime Stage ────────────────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+# Security: non-root user
+RUN groupadd -r census --gid=1000 && \
+    useradd -r -g census --uid=1000 --home-dir=/app --shell=/sbin/nologin census
+
+# Runtime dependencies only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+WORKDIR /app
+
+# Copy Python packages from builder
+COPY --from=builder /root/.local /home/census/.local
+
+# Copy application code
+COPY --chown=census:census src/backend ./backend
+COPY --chown=census:census migrations ./migrations
+
+# Read-only root filesystem: create writable tmp
+RUN mkdir -p /tmp /data/faiss && chown census:census /tmp /data/faiss
+
+USER census
+
+ENV PATH=/home/census/.local/bin:$PATH
+ENV PYTHONPATH=/app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+
+CMD ["uvicorn", "backend.census.api:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "4", \
+     "--loop", "uvloop", \
+     "--http", "httptools", \
+     "--no-access-log"]
